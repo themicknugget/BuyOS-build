@@ -1,0 +1,281 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: "VyOS 1.5 Rolling"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/rolling-1.5.yaml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VYOS_URL: https://github.com/vyos/vyos-build
+  VYOS_BRANCH: current
+  VYOS_ARCH: amd64
+  VYOS_BUILD_BY: autobuild-vyos@whydontyou.work
+  VYOS_BUILD_TYPE: release
+  VYOS_VERSION: 1.5-rolling
+
+jobs:
+  checkVersion:
+    name: Check for new VyOS commits
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Get latest vyos-build commit hash
+        id: get_commit_hash
+        run: |
+          LATEST_COMMIT=$(git ls-remote https://github.com/vyos/vyos-build ${{ env.VYOS_BRANCH}} | awk '{print $1}')
+          echo "latest_commit=${LATEST_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if commit hash changed
+        if: always()
+        id: check_commit_changed
+        run: |
+          if [ "${{ vars.PREV_COMMIT }}" != "${{ steps.get_commit_hash.outputs.latest_commit }}" ]; then
+            echo "Commit hash has changed."
+            echo "commitHashChanged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${{ vars.PREV_COMMIT }}=${{ steps.get_commit_hash.outputs.latest_commit }}"
+            echo "Commit hash has not changed. Exiting."
+            exit 0
+          fi
+    outputs:
+      commitHashChanged: ${{ steps.check_commit_changed.outputs.commitHashChanged }}
+      latest_commit: ${{ steps.get_commit_hash.outputs.latest_commit }}
+
+  release:
+    name: Build VyOS
+    needs: checkVersion
+    runs-on: ubuntu-latest
+    if: ${{ needs.checkVersion.outputs.commitHashChanged }}
+    permissions:
+      contents: write
+    container:
+      image: vyos/vyos-build:current
+      options: --privileged
+    steps:
+      - name: Generate Token
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: "${{ secrets.BOT_APP_ID }}"
+          private-key: "${{ secrets.BOT_APP_PRIVATE_KEY }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: .
+          sparse-checkout: |
+            custom
+  
+      - name: Setup variables
+        id: vars
+        shell: bash
+        run: |
+          build_date=$(date +%Y%m%d%H%M)
+          echo "tag-name=${{ env.VYOS_VERSION }}-${build_date}" >> "$GITHUB_OUTPUT"
+          echo "iso-name=${{ env.VYOS_VERSION }}-${build_date}-${{ env.VYOS_ARCH }}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone vyos-build
+        id: clone-vyos
+        run: |
+          git clone -b ${{ env.VYOS_BRANCH }} --depth 1 --single-branch ${{ env.VYOS_URL }}
+          echo "vyos_kernel_version=$(awk -v key="kernel_version" '$1 == key {gsub(/"/, "", $3); print $3}' "vyos-build/data/defaults.toml")" > "$GITHUB_OUTPUT"
+  
+      - name: Download sops deb
+        uses: robinraju/release-downloader@768b85c8d69164800db5fc00337ab917daf3ce68 # v1.7
+        with:
+          repository: mozilla/sops
+          latest: true
+          fileName: "*amd64.deb"
+          out-file-path: vyos-build/packages
+  
+      - name: Download vyaml deb
+        uses: robinraju/release-downloader@v1.9
+        with:
+          repository: p3lim/vyaml
+          latest: true
+          fileName: "*amd64.deb"
+          out-file-path: vyos-build/packages
+  
+      - name: Restore cached kernel and module sources
+        id: cache-kernel-restore
+        uses: buildjet/cache/restore@v3
+        with:
+          path: |
+            vyos-build/packages/linux-kernel/linux
+            vyos-build/packages/linux-kernel/kernel-vars
+            vyos-build/packages/linux-kernel/linux-firmware
+            vyos-build/packages/linux-kernel/**/*.deb
+          key: ${{ github.workflow }}-v${{ steps.clone-vyos.outputs.vyos_kernel_version }}
+  
+      - name: Fetch kernel sources
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.cache-kernel-restore.outputs.cache-hit != 'true'
+        run: git clone -b v${{ steps.clone-vyos.outputs.vyos_kernel_version }} --depth 1 --single-branch https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+  
+      - name: Fetch linux-firmware sources
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.cache-kernel-restore.outputs.cache-hit != 'true'
+        run: |
+          firmware_tag=$(sed -n "/'name': 'linux-firmware'/ s/.*'scmCommit': '\([0-9]\{8\}\)'.*/\1/p" Jenkinsfile)
+          git clone -b $firmware_tag --depth 1 --single-branch https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git
+  
+      - name: Generate kernel config
+        id: generate-kernel-config
+        run: |
+          # Define paths and variables
+          ORIGINAL_CONFIG=vyos-build/packages/linux-kernel/arch/x86/configs/vyos_defconfig
+          TARGET_CONFIG=vyos-build/packages/linux-kernel/linux/arch/x86/configs/vyos_defconfig
+          CONFIG_FRAGMENTS=$(find custom/kernel-configs -type f)
+
+          # Exit if no config fragments found
+          [ -z "$CONFIG_FRAGMENTS" ] && echo "No config fragments found in custom/kernel-configs, skipping" && exit 0
+
+          # Merge config fragments
+          KCONFIG_CONFIG=newconfig vyos-build/packages/linux-kernel/linux/scripts/kconfig/merge_config.sh -m $ORIGINAL_CONFIG $CONFIG_FRAGMENTS
+
+          # Handle merge result
+          if [ $? -eq 0 ]; then
+            echo "Merge completed successfully."
+            # Copy newconfig to ORIGINAL_CONFIG if TARGET_CONFIG doesn't exist or configs differ
+            if [ ! -f "$TARGET_CONFIG" ] || ! diff -q "$TARGET_CONFIG" "newconfig" > /dev/null; then
+              echo "Config changed, updating."
+              cp -f newconfig $ORIGINAL_CONFIG
+              echo "kconfig-changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Config did not change."
+            fi
+            exit 0
+          else
+            echo "Merge failed."
+            exit 1
+          fi
+  
+      - name: Compile kernel
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.generate-kernel-config.outputs.kconfig-changed == 'true'
+        run: |
+          sudo ./build-kernel.sh
+  
+      - name: Compile linux firmware
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.generate-kernel-config.outputs.kconfig-changed == 'true'
+        run: |
+          sed -i 's/\/drivers\/net//g' build-linux-firmware.sh 
+          ./build-linux-firmware.sh
+  
+      - name: Compile Accel-PPP out-of-tree module
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.generate-kernel-config.outputs.kconfig-changed == 'true'
+        run: |
+          rm -rf accel-ppp
+          git clone https://github.com/accel-ppp/accel-ppp.git
+          cd accel-ppp && git checkout 19c36e593d9b && cd ..
+          ./build-accel-ppp.sh
+  
+      - name: Compile Intel QAT (Quick-Assist Technology) drivers
+        working-directory: vyos-build/packages/linux-kernel
+        if: steps.generate-kernel-config.outputs.kconfig-changed == 'true'
+        run: |
+          ./build-intel-qat.sh
+  
+      - name: Save kernel and some of the module sources to cache
+        uses: buildjet/cache/save@v3
+        if: steps.generate-kernel-config.outputs.kconfig-changed == 'true' || steps.cache-kernel-restore.outputs.cache-hit != 'true'
+        id: kernel-cache
+        with:
+          path: |
+           vyos-build/packages/linux-kernel/linux
+           vyos-build/packages/linux-kernel/kernel-vars
+           vyos-build/packages/linux-kernel/linux-firmware
+           vyos-build/packages/linux-kernel/**/*.deb
+          key: ${{ github.workflow }}-v${{ steps.clone-vyos.outputs.vyos_kernel_version }}
+  
+      - name: Symlink kernel
+        run: |
+          mkdir -p /usr/src
+          ln -sv $GITHUB_WORKSPACE/vyos-build/packages/linux-kernel/linux /usr/src/linux
+  
+      - name: Debug ls of packages and linux-kernel folder
+        run: |
+          ls -al vyos-build/packages
+          ls -al vyos-build/packages/linux-kernel/
+  
+      - name: "Create symbolic links for cached .deb files"
+        if: steps.cache-kernel-restore.outputs.cache-hit == 'true' || steps.kernel-module-ixgbe-cache-restore.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          cd vyos-build/packages/linux-kernel
+          for package in $(ls linux-*.deb)
+          do
+            ln -sf linux-kernel/$package ..
+          done
+  
+      - name: Build vyos Image
+        id: build-vyos-image
+        shell: bash
+        working-directory: vyos-build
+        run: |
+          sudo make clean
+          sudo ./build-vyos-image iso \
+              --architecture ${{ env.VYOS_ARCH }} \
+              --build-by ${{ env.VYOS_BUILD_BY }} \
+              --build-type ${{ env.VYOS_BUILD_TYPE }} \
+              --build-comment "VyOS with additional packages and custom kernel" \
+              --version ${{ steps.vars.outputs.tag-name }} \
+              --custom-package "git" \
+              --custom-package "iptables" \
+              --custom-package "jo" \
+              --custom-package "vim" \
+              --custom-package "moreutils" \
+              --custom-package "python3-venv" \
+              --custom-package "tree" \
+              --custom-package "age"
+          ls -l build/
+          [[ $(ls build/vyos-${{ steps.vars.outputs.iso-name }}.iso 2> /dev/null) ]] && exit 0 || exit 1 
+  
+      - name: Create release with artifact
+        uses: ncipollo/release-action@6c75be85e571768fa31b40abf38de58ba0397db5 # v1.13.0
+        with:
+          token: "${{ steps.app-token.outputs.token }}"
+          tag: "v${{ steps.vars.outputs.tag-name }}"
+          artifacts: "./vyos-build/build/vyos-${{ steps.vars.outputs.iso-name }}.iso"
+          artifactErrorsFailBuild: true
+          body: |
+            Official VyOS Changelog:
+            https://docs.vyos.io/en/latest/changelog/1.5.html
+  
+      - name: Set previous commit hash
+        uses: action-pack/set-variable@v1
+        with:
+          name: 'PREV_COMMIT'
+          value: ${{ needs.checkVersion.outputs.latest_commit }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Delete orphaned release
+        if: failure()
+        uses: dev-drprasad/delete-tag-and-release@5eafd8668311bf3e4d6c1e9898f32a317103de68 # v0.2.1
+        env:
+          GITHUB_TOKEN: "${{ steps.app-token.outputs.token }}"
+        with:
+          tag_name: "v${{ steps.vars.outputs.tag-name }}"
+          delete_release: true
+
+      - name: Remove old releases
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 120
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: "${{ steps.app-token.outputs.token }}"
