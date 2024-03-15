@@ -81,6 +81,11 @@ jobs:
           git clone -b ${{ env.VYOS_TAG }} --depth 1 --single-branch ${{ env.VYOS_URL }}
           echo "vyos_kernel_version=$(awk -v key="kernel_version" '$1 == key {gsub(/"/, "", $3); print $3}' "vyos-build/data/defaults.toml")" > "$GITHUB_OUTPUT"
 
+      - name: Switch to tag
+        shell: bash
+        working-directory: vyos-build
+        run: git switch -c "${{ env.VYOS_TAG }}"
+
       - name: Download sops deb
         uses: robinraju/release-downloader@v1.9
         with:
