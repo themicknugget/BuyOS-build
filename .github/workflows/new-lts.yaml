@@ -65,4 +65,4 @@ jobs:
     name: Build New LTS
     needs: check_tags
     if: ${{ needs.check_tags.outputs.NEW_LTS_TAG != '' }}
-    uses: ./.github/actions/lts-1.4.x.yaml
+    uses: ./.github/workflows/lts-1.4.x.yaml
