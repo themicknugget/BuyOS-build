@@ -1,9 +1,9 @@
 name: Check New Tags
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
 
 jobs:
   check_tags:

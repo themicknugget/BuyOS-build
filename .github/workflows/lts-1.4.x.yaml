@@ -4,6 +4,7 @@ name: "VyOS LTS 1.4.x"
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
