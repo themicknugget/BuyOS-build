@@ -26,7 +26,7 @@ jobs:
           tags=$(git ls-remote --tags https://github.com/vyos/vyos-build "refs/tags/1.4*" | cut -d/ -f3 | tr '\n' ' ')
 
           # If the variable is empty, populate it and exit
-          if [ -z "$existing_tags" ]; then
+          if [[ -z "$existing_tags" ]]; then
             echo "LTS_TAGS=$tags" >> "$GITHUB_OUTPUT"
             exit 0
           fi
