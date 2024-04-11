@@ -5,6 +5,10 @@ name: "VyOS LTS 1.4.x"
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      LTS_TAG:
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,7 +53,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VYOS_TAG=${{ vars.LTS_TAG }}
+          VYOS_TAG=${{ inputs.LTS_TAG || vars.LTS_TAG }}
           VYOS_VERSION=${VYOS_TAG%-*}
           echo "vyos-version=${VYOS_VERSION}" >> "$GITHUB_OUTPUT"
           echo "vyos-version-sanitized=${VYOS_VERSION//./_}" >> "$GITHUB_OUTPUT"
@@ -72,13 +76,13 @@ jobs:
       - name: Clone vyos-build
         id: clone-vyos
         run: |
-          git clone -b ${{ vars.LTS_TAG }} --depth 1 --single-branch ${{ env.VYOS_URL }}
+          git clone -b ${{ inputs.LTS_TAG || vars.LTS_TAG }} --depth 1 --single-branch ${{ env.VYOS_URL }}
           echo "vyos_kernel_version=$(awk -v key="kernel_version" '$1 == key {gsub(/"/, "", $3); print $3}' "vyos-build/data/defaults.toml")" > "$GITHUB_OUTPUT"
 
       - name: Switch to tag
         shell: bash
         working-directory: vyos-build
-        run: git switch -c "${{ vars.LTS_TAG }}"
+        run: git switch -c "${{ inputs.LTS_TAG || vars.LTS_TAG }}"
 
       - name: Download sops deb
         uses: robinraju/release-downloader@v1.9

@@ -69,3 +69,5 @@ jobs:
     permissions:
       contents: write
     uses: ./.github/workflows/lts-1.4.x.yaml
+    with:
+      LTS_TAG: ${{ needs.check_tags.outputs.NEW_LTS_TAG }}
