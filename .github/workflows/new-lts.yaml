@@ -67,4 +67,5 @@ jobs:
     if: ${{ needs.check_tags.outputs.NEW_LTS_TAG != '' }}
     permissions:
       contents: write
+      secrets: read
     uses: ./.github/workflows/lts-1.4.x.yaml
