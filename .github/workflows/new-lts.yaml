@@ -40,7 +40,7 @@ jobs:
           done
 
           # If the list of LTS tags has changed, update it
-          if [[ "$existing_tags != "${{ vars.LTS_TAGS }}" ]]; then
+          if [[ "$existing_tags" != "${{ vars.LTS_TAGS }}" ]]; then
             echo "LTS_TAGS=$existing_tags" >> "$GITHUB_OUTPUT"
           fi
 
