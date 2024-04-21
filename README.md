@@ -1,6 +1,6 @@
-# vyos
+# BuyOS (built from "Open Source" VyOS
 
-VyOS **1.4 LTS** and **1.5-rolling** with additional packages.
+BuyOS **1.4 LTS** and **1.5-rolling** with additional packages.
 
 ## Packages
 
